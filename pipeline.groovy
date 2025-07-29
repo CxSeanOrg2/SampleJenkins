@@ -274,18 +274,6 @@ pipeline {
                         def tasks    = [:]
                         def IS_UNIX  = isUnix()
                         def cliCmd   = IS_UNIX ? "${env.WORKSPACE}/${CLI_DIR}/cx" : "${env.WORKSPACE}\\${CLI_DIR}\\cx.exe"
-                        
-                        // Test CLI availability
-                        echo "[DEBUG] Testing CLI availability: ${cliCmd}"
-                        try {
-                            def cliTest = IS_UNIX ?
-                                sh(script: "${cliCmd} --help", returnStdout: true).trim() :
-                                bat(script: "${cliCmd} --help", returnStdout: true).trim()
-                            echo "[DEBUG] CLI help output (first 200 chars): ${cliTest.take(200)}"
-                        } catch (Exception e) {
-                            echo "[ERROR] CLI test failed: ${e.message}"
-                            throw new Exception("CLI not available or not working: ${e.message}")
-                        }
 
                         reposList.each { repoName ->
                             def key = "${repoName}|${releaseTag}"
