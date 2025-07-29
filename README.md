@@ -1,276 +1,168 @@
 # Checkmarx ONE Compliance Pipeline
 
-A robust Jenkins pipeline for automated compliance scanning across GitHub organizations using Checkmarx ONE. This pipeline discovers repositories with specific release branches/tags, performs parallel security scans, and generates consolidated reports with both email delivery and download capabilities.
+A Jenkins pipeline that automates security scanning across multiple repositories in a GitHub organization for specific branches/tags. The pipeline downloads the Checkmarx ONE CLI, scans repositories, and generates PDF reports using a two-step process for reliable email delivery and local file saving.
 
-## 🚀 Features
+## Features
 
-- **Automated Repository Discovery**: Scans GitHub organizations for repositories containing specific release branches or tags
-- **Parallel Scanning**: Executes Checkmarx ONE scans concurrently across multiple repositories
-- **Consolidated Report Generation**: Creates comprehensive reports combining results from multiple projects using Checkmarx ONE API v2
-- **Dual Delivery**: Provides both email delivery and direct download of reports
-- **Persistence**: Maintains scan status across pipeline restarts to avoid re-scanning completed repositories
-- **Cross-Platform**: Works on both Unix/Linux and Windows Jenkins agents
-- **Configurable**: Highly parameterized for different environments and requirements
-- **Enterprise Ready**: Handles long-running scans and provides comprehensive logging
+- **Automated Repository Discovery**: Automatically finds repositories containing the target branch/tag
+- **Parallel Scanning**: Scans multiple repositories simultaneously for efficiency
+- **Two-Step PDF Generation**: First runs the scan, then generates PDF reports using scan IDs for reliability
+- **Email Delivery**: Sends PDF reports directly to specified email recipients
+- **Local File Saving**: Saves PDF reports to Jenkins workspace with custom naming
+- **Smart Tag Management**: Uses clean tag names (e.g., "25-6-x" instead of "release:25-6-x")
+- **Enhanced Persistence**: Maintains scan status across pipeline restarts
+- **Force Rescan Control**: Option to ignore existing status and rescan everything
+- **Enhanced Debugging**: Comprehensive logging and error handling
+- **Workspace Integration**: Properly saves and archives PDF files in Jenkins workspace
+- **Post-Build Archiving**: Ensures all generated PDFs are archived regardless of detection timing
 
-## 📋 Pipeline Stages
+## Pipeline Stages
 
-### 1. **Prepare**
-- Downloads and caches Checkmarx ONE CLI
-- Sets up environment variables
-- Logs configuration parameters
+1. **Prepare**: Downloads and sets up Checkmarx ONE CLI
+2. **Find Repos with Tag**: Identifies repositories containing the target branch/tag
+3. **Scan Repositories**: Runs security scans in parallel, then generates PDF reports using scan IDs
 
-### 2. **Find Repos with Tag**
-- Queries GitHub API for repositories in the specified organization
-- Identifies repositories containing the target branch or tag
-- Creates a list of repositories to scan
-
-### 3. **Scan Repositories** (Parallel)
-- Clones each repository with the specified branch/tag
-- Executes Checkmarx ONE scans using the CLI
-- Stores scan results and project IDs for reporting
-- Handles scan completion and error states
-
-### 4. **Generate Consolidated PDF**
-- Creates a consolidated report using Checkmarx ONE Reports Service API v2
-- Combines results from multiple projects into a single comprehensive report
-- Sends the report via email using Checkmarx ONE's built-in email service
-- Downloads the report and archives it as a Jenkins artifact
-- Provides dual delivery: email + downloadable artifact
-
-## 🔧 Setup Instructions
+## Setup
 
 ### Prerequisites
 
-1. **Jenkins Server** with appropriate plugins:
-   - Pipeline plugin
-   - Credentials plugin
-   - Git plugin
-   - Email Extension plugin (for notifications)
+- Jenkins with Pipeline plugin
+- Jenkins credentials configured:
+  - `github-pat`: GitHub Personal Access Token (Secret Text)
+  - `cx-api-key`: Checkmarx ONE API Key (Secret Text)
+- Jenkins workspace with write access for PDF file saving
 
-2. **Jenkins Agent** with:
-   - Git access to your repositories
-   - Internet access for CLI downloads
-   - Sufficient disk space for scans and reports
+### Configuration
 
-### 1. Configure Jenkins Credentials
+The pipeline uses the following parameters (configurable via Jenkins UI):
 
-Create the following credentials in Jenkins:
+- `BRANCH_OR_TAG`: Release branch or tag to scan (default: '25-6-x')
+- `GITHUB_ORG`: GitHub organization to scan (default: 'CxSeanOrg2')
+- `EMAIL_RECIPIENT`: Email address to receive PDF reports
+- `DEBUG`: Enable verbose debugging output
+- `FORCE_RESCAN`: Ignore existing status DB and rescan everything
+- `CLI_VERSION`: Checkmarx ONE CLI version to download
+- `CRON_SCHEDULE`: Cron schedule for automated runs
 
-#### GitHub Personal Access Token
-- **Type**: Secret text
-- **ID**: `github-pat`
-- **Description**: GitHub PAT for repository access
-- **Value**: Your GitHub Personal Access Token with `repo` scope
+## How It Works
 
-#### Checkmarx ONE API Key
-- **Type**: Secret text  
-- **ID**: `cx-api-key`
-- **Description**: Checkmarx ONE API Key (JWT token) used for authentication
-- **Value**: Your Checkmarx ONE API Key (JWT token) - this is used as a refresh token to obtain short-lived access tokens
+### Two-Step PDF Generation Process
 
-### 2. Create Jenkins Pipeline Job
+1. **Scan Phase**: For each repository:
+   - Clones the repository with the target branch/tag
+   - Runs `cx scan create` to initiate the security scan
+   - Waits for scan completion and extracts the scan ID
 
-1. Create a new Pipeline job in Jenkins
-2. Copy the contents of `pipeline.groovy` into the pipeline script
-3. Configure the pipeline parameters as needed
+2. **Report Generation Phase**: For each completed scan:
+   - Uses `cx results show` with the scan ID to generate PDF reports
+   - Sends reports via email to specified recipients
+   - Saves reports locally to Jenkins workspace with custom naming
+   - Archives the generated PDF files
 
-### 3. Configure Pipeline Parameters
+### Status Persistence
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `DEBUG` | `false` | Enable verbose debugging output |
-| `BRANCH_OR_TAG` | `25-6-x` | Release branch or tag to scan |
-| `GITHUB_ORG` | `CxSeanOrg2` | GitHub organization to scan |
-| `EMAIL_RECIPIENT` | `Sean.Carroll@checkmarx.com` | Email for report notifications |
-| `CLI_VERSION` | `2.0.58` | Checkmarx ONE CLI version |
-| `CRON_SCHEDULE` | `H 0 * * 0` | Cron schedule for automated runs |
-| `FORCE_RESCAN` | `false` | Force rescan of all repositories |
-| `CX_BASE_URL` | `https://ast.checkmarx.net` | Checkmarx ONE base URL |
-| `CX_IAM_URL` | `https://iam.checkmarx.net` | Checkmarx IAM URL |
-| `CX_OAUTH_CLIENT_ID` | `ast-app` | OAuth client ID (used with API key for token exchange) |
-| `CX_REPORT_FORMAT` | `pdf` | Report format (pdf, html, json, sarif, sonar, markdown) |
-| `CX_DEFAULT_TENANT` | `workshop` | Default tenant (fallback) |
+The pipeline maintains a status database (`.scan_status.json`) that tracks:
+- Repository name and tag
+- Scan ID and project ID
+- Scan status (Completed/Failed)
 
-### 4. Authentication Method
+This allows the pipeline to skip already completed scans on subsequent runs, unless `FORCE_RESCAN` is enabled.
 
-The pipeline uses a hybrid authentication approach:
+### PDF File Management
 
-1. **API Key Storage**: Your Checkmarx ONE API key (JWT token) is stored as a Jenkins credential
-2. **Token Exchange**: The pipeline treats this API key as a refresh token and exchanges it for short-lived access tokens
-3. **OAuth Client**: Uses the configured OAuth client ID (`ast-app` by default) for the token exchange
-4. **Tenant Detection**: Automatically extracts tenant information from the JWT token
+- **Naming**: Reports are named as `{repoName}_{releaseTag}_{date}.pdf`
+- **Location**: Saved to Jenkins workspace root directory
+- **Archiving**: Automatically archived as Jenkins artifacts
+- **Fallback Detection**: Multiple strategies to find and archive PDF files
 
-**Note**: This approach provides enhanced security by using short-lived access tokens while maintaining the convenience of storing a long-lived API key.
-
-### 5. Configure Triggers
-
-The pipeline supports both manual and automated execution:
-
-- **Manual**: Run with parameters through Jenkins UI
-- **Automated**: Uses cron schedule (default: every Sunday at midnight)
-
-## 📁 File Structure
+## File Structure
 
 ```
-workspace/
-├── CxONE_CLI/                    # Cached CLI binaries
-│   ├── cx (Unix)
-│   └── cx.exe (Windows)
-├── .scan_status.json             # Scan status persistence
-├── .repos_to_scan.json           # Repository list
-├── {repo}_25-6-x/               # Repository workspaces
-│   ├── source code
-│   └── scan artifacts
-└── 25-6-x_2025-07-27_Consolidated.pdf  # Consolidated report
+SampleJenkins/
+├── pipeline.groovy          # Main Jenkins pipeline script
+├── README.md               # This documentation
+├── .scan_status.json       # Scan status persistence (created by pipeline)
+├── .repos_to_scan.json     # Repository list (created by pipeline)
+└── Cx_ProjectReport_*.pdf  # Generated PDF reports (created by pipeline)
 ```
 
-## 🔄 How It Works
-
-### Repository Discovery
-1. Queries GitHub API for all repositories in the organization
-2. Checks each repository for the specified branch or tag
-3. Creates a list of repositories to scan
-
-### Parallel Scanning
-1. Creates separate workspaces for each repository
-2. Clones repositories with the target branch/tag
-3. Executes Checkmarx ONE scans in parallel
-4. Stores scan IDs and project IDs for reporting
-
-### Consolidated Report Generation
-1. **API-Based Generation**: Uses Checkmarx ONE Reports Service API v2
-2. **Project Aggregation**: Combines results from multiple projects into a single report
-3. **Email Delivery**: Sends the report via Checkmarx ONE's built-in email service
-4. **Direct Download**: Downloads the report using the web UI endpoint
-5. **Dual Archiving**: Archives the report as a Jenkins artifact for easy access
-
-### Report Features
-- **Comprehensive Coverage**: Includes projects overview, vulnerability insights, and total vulnerabilities
-- **Multiple Scanners**: Covers SAST, SCA, and IaC results
-- **Severity Filtering**: Focuses on Critical, High, and Medium severity findings
-- **State Management**: Includes To-Verify, Confirmed, and Urgent findings
-- **Status Tracking**: Covers both new and recurrent vulnerabilities
-
-### Persistence
-- Scan status is stored in `.scan_status.json`
-- Completed scans are skipped unless `FORCE_RESCAN` is enabled
-- Pipeline can be restarted without losing progress
-
-## 🛠️ Customization
-
-### Environment-Specific Configuration
-
-#### Development Environment
-```groovy
-CX_BASE_URL = 'https://dev-ast.checkmarx.net'
-CX_DEFAULT_TENANT = 'dev-tenant'
-```
-
-#### Production Environment
-```groovy
-CX_BASE_URL = 'https://ast.checkmarx.net'
-CX_DEFAULT_TENANT = 'prod-tenant'
-```
-
-### Report Format Options
-
-- **PDF**: Comprehensive reports with all sections (default)
-- **HTML**: Web-viewable reports
-- **JSON**: Machine-readable format for integration
-- **SARIF**: Standard format for security tools
-- **SonarQube**: Integration with SonarQube
-- **Markdown**: Documentation-friendly format
-
-### Email Integration
-
-The pipeline uses Checkmarx ONE's built-in email service:
-
-1. **Automatic Delivery**: Reports are sent directly from Checkmarx ONE
-2. **Jenkins Notification**: Additional notification email sent via Jenkins Email Extension plugin
-3. **Dual Delivery**: Both Checkmarx ONE email and Jenkins artifact available
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-#### Jenkins Executor Issues
-- **Problem**: "Waiting for next available executor"
-- **Solution**: Check Jenkins agent status and executor configuration
-
-#### Authentication Errors
-- **Problem**: 401/403 errors from Checkmarx ONE
-- **Solution**: Verify API key and tenant configuration
-
-#### Report Generation Failures
-- **Problem**: API report generation fails
-- **Solution**: Check API access, project IDs, and scan completion status
-
-#### Email Delivery Issues
-- **Problem**: Reports not received via email
-- **Solution**: Check Checkmarx ONE email configuration and recipient address
-
-#### Download Failures
-- **Problem**: Report download fails
-- **Solution**: Check authentication and web UI endpoint access
-
-#### Repository Access Issues
-- **Problem**: Git clone failures
-- **Solution**: Verify GitHub PAT permissions and repository access
+## Troubleshooting
 
 ### Debug Mode
 
-Enable debug mode by setting `DEBUG = true` to see detailed logging:
-- API request/response details
-- CLI command execution
-- File operations
-- Status polling information
-- Download progress
+Enable debug mode by setting the `DEBUG` parameter to `true` in the Jenkins UI. This provides:
+- Detailed CLI command output
+- File system operations logging
+- Status database contents
+- PDF file detection details
+
+### Common Issues
+
+#### PDF Files Not Found
+- **Cause**: File system timing or naming inconsistencies
+- **Solution**: The pipeline now includes enhanced file detection with multiple fallback strategies
+- **Debug**: Check debug logs for file listing and detection attempts
+
+#### Force Rescan Not Working
+- **Cause**: Status database logic issues
+- **Solution**: Fixed status database clearing logic and persistence
+- **Debug**: Check debug logs for status DB operations
+
+#### Only Partial Reports Sent
+- **Cause**: Repository processing or email delivery issues
+- **Solution**: Enhanced logging and summary reporting
+- **Debug**: Check scan summary at end of pipeline
+
+#### File Not Found Issues
+- **Cause**: Workspace path or file system access problems
+- **Solution**: Enhanced workspace verification and file detection
+- **Debug**: Check workspace path and file existence logs
 
 ### Log Analysis
 
-Key log indicators:
-- `✅ Scan completed` - Successful scan
-- `📊 Consolidated report created` - Successful report generation
-- `📧 Report sent via email` - Email delivery confirmation
-- `📥 Report downloaded` - Download confirmation
-- `📋 Report archived` - Jenkins artifact creation
-- `❌ Error` - Pipeline failures
+Key log sections to monitor:
+- `[DEBUG]` messages when debug mode is enabled
+- `[ARCHIVE]` messages for PDF file archiving
+- `[POST]` messages for post-build archiving
+- `=== SCAN SUMMARY ===` for processing statistics
 
-## 📚 Reference Documentation
+## Performance Optimization
 
-- [Checkmarx ONE Release Notes](https://docs.checkmarx.com/en/34965-68476-cxone-release-notes.html)
-- [Checkmarx ONE API Reference](https://checkmarx.stoplight.io/docs/checkmarx-one-api-reference-guide)
-- [Checkmarx ONE Reports Service API v2](https://checkmarx.stoplight.io/docs/checkmarx-one-api-reference-guide/reports-service-rest-api-export-v1.0.0)
-- [Checkmarx ONE CLI Documentation](https://docs.checkmarx.com/en/34965-68625-checkmarx-one-cli-commands.html)
-- [Checkmarx ONE CLI Installation](https://docs.checkmarx.com/en/34965-68625-checkmarx-one-cli-commands.html#installation)
+- **Parallel Processing**: Repositories are scanned in parallel
+- **Status Caching**: Completed scans are skipped unless forced
+- **CLI Caching**: CLI is downloaded once and reused
+- **Incremental Scanning**: Only new/changed repositories are processed
 
-## 🔒 Security Considerations
+## Security Considerations
 
-- API keys and tokens are stored as Jenkins credentials
-- No sensitive data is logged in debug output
-- Repository access is controlled via GitHub PAT
-- Scan results are archived as Jenkins artifacts
-- Reports are delivered via secure email and download channels
+- **Credential Management**: Uses Jenkins credential store for sensitive data
+- **API Key Protection**: API keys are masked in logs
+- **Secure Communication**: Uses HTTPS for all API calls
+- **Sandbox Compatibility**: Designed to work within Jenkins script security sandbox
 
-## 📈 Performance Optimization
+## Recent Fixes
 
-- **Parallel scanning** reduces total execution time
-- **CLI caching** avoids repeated downloads
-- **Status persistence** prevents unnecessary re-scans
-- **Configurable polling** allows tuning for different environments
-- **Dual delivery** ensures report availability even if one method fails
+### PDF Archiving Issues (Latest)
+- **Problem**: PDF files were being generated but not found for archiving
+- **Solution**: Enhanced file detection with multiple fallback strategies
+- **Added**: Post-build archiving to ensure all PDFs are captured
+- **Improved**: File system timing with longer wait periods
 
-## 🤝 Contributing
+### Repository Processing Issues (Latest)
+- **Problem**: Only 3 out of 4 repositories were being processed
+- **Solution**: Enhanced logging and summary reporting
+- **Added**: Detailed processing statistics
+- **Fixed**: Status database logic for completed scans
 
-To contribute to this pipeline:
+### Email Delivery Issues (Previous)
+- **Problem**: PDF reports not being sent via email
+- **Solution**: Switched to two-step process using `cx results show`
+- **Improved**: Email delivery reliability with proper CLI flags
 
-1. Test changes in a development environment
-2. Update documentation for any new parameters
-3. Ensure cross-platform compatibility
-4. Add appropriate error handling
-5. Update this README with any changes
+## Support
 
-## 📄 License
-
-This pipeline is provided as-is for use with Checkmarx ONE. Please ensure compliance with your organization's security policies and Checkmarx licensing requirements. 
+For issues or questions:
+1. Enable debug mode and check logs
+2. Review the troubleshooting section
+3. Check Jenkins console output for detailed error messages
+4. Verify credential configuration and API access 

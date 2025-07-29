@@ -6,18 +6,18 @@ pipeline {
      * 
      * PURPOSE: This pipeline automates security scanning across multiple repositories
      *          in a GitHub organization for a specific branch/tag. It downloads the
-     *          Checkmarx ONE CLI, scans repositories, and generates consolidated reports.
+     *          Checkmarx ONE CLI, scans repositories, and generates PDF reports using
+     *          the scan results command for reliable email delivery and local file saving.
      * 
      * WORKFLOW:
      * 1. Prepare: Download and setup Checkmarx ONE CLI
      * 2. Find Repos: Identify repositories containing the target branch/tag
-     * 3. Scan Repositories: Run security scans in parallel
-     * 4. Generate Reports: Create consolidated PDF reports
+     * 3. Scan Repositories: Run security scans in parallel, then generate PDF reports using scan IDs
      * 
      * PREREQUISITES:
      * - Jenkins credentials: 'github-pat' (GitHub Personal Access Token)
      * - Jenkins credentials: 'cx-api-key' (Checkmarx ONE API Key)
-     * - Jenkins plugins: Email Extension (for notifications)
+     * - Jenkins plugins: None required (uses Checkmarx ONE API for email delivery)
      * 
      * AUTHOR: Sean Carroll
      * LAST UPDATED: 2025
@@ -48,8 +48,9 @@ pipeline {
         string(
             name: 'EMAIL_RECIPIENT',
             defaultValue: 'Sean.Carroll@checkmarx.com',
-            description: 'Email address to receive consolidated reports'
+            description: 'Email address to receive PDF reports'
         )
+
         string(
             name: 'CLI_VERSION',
             defaultValue: '2.0.58',
@@ -97,7 +98,7 @@ pipeline {
     environment {
         /* 
          * ENVIRONMENT VARIABLES
-         * These define paths and settings used throughout the pipeline
+         * These define paths and settings used throughout the pipeine
          */
         
         /* Folder where we cache the CLI per agent OS */
@@ -127,13 +128,13 @@ pipeline {
                         /* Detect platform once */
                         IS_UNIX = isUnix()
 
-                        /* Propagate debug flag to env so helper functions can read it */
+                        /* Propagate debug flag to env so helper fuctions can read it */
                         env.DEBUG = params.DEBUG.toString()
                         
                         /* Log parameter values for debugging */
                         echo "Using branch/tag: ${params.BRANCH_OR_TAG}"
                         echo "Using GitHub org: ${params.GITHUB_ORG}"
-                        echo "Using email recipient: ${params.EMAIL_RECIPIENT}"
+
                         echo "Using CLI version: ${params.CLI_VERSION}"
                         echo "Using cron schedule: ${params.CRON_SCHEDULE}"
                         echo "Force rescan: ${params.FORCE_RESCAN}"
@@ -143,7 +144,7 @@ pipeline {
                         echo "Using report format: ${params.CX_REPORT_FORMAT}"
                         echo "Using default tenant: ${params.CX_DEFAULT_TENANT}"
 
-                        /* -------------------------------------------------------------------
+                        /* ------------------------------------------------------------------
                          * CLI DOWNLOAD SECTION
                          * 
                          * PURPOSE: Download and extract the Checkmarx ONE CLI tool
@@ -157,10 +158,10 @@ pipeline {
                          * DOWNLOAD URLS:
                          * - Linux: https://github.com/Checkmarx/ast-cli/releases/download/{VERSION}/ast-cli_{VERSION}_linux_x64.tar.gz
                          * - Windows: https://github.com/Checkmarx/ast-cli/releases/download/{VERSION}/ast-cli_{VERSION}_windows_x64.zip
-                         * ------------------------------------------------------------------- */
+                         * ------------------------------------------------------------------ */
                         if (!fileExists("${CLI_DIR}/cx${IS_UNIX ? '' : '.exe'}")) {
                             dir(CLI_DIR) {
-                                echo 'Downloading Checkmarx ONE CLI …'
+                                echo 'Downloading Checkmarx ONE CLI…'
                                 if (IS_UNIX) {
                                     sh """
                                         curl -sL \\
@@ -194,20 +195,20 @@ pipeline {
                         def releaseTag = params.BRANCH_OR_TAG
                         debug("Fetching repo list for org ${githubOrg}")
 
-                        /* --------------------------------------------------------------
+                        /* -------------------------------------------------------------
                          * Identify repositories containing the target tag/branch
-                         * -------------------------------------------------------------- */
+                         * ------------------------------------------------------------- */
                         def reposJson = httpJson(
                             "https://api.github.com/orgs/${githubOrg}/repos?per_page=100",
-                            "token ${GITHUB_TOKEN}"
+                            "Bearer ${GITHUB_TOKEN}"
                         )
 
                         def selectedRepos = []
                         reposJson.each { repo ->
                             def repoName = repo.name
                             def apiBase = "https://api.github.com/repos/${githubOrg}/${repoName}"
-                            def tagsArr = httpJson("${apiBase}/tags", "token ${GITHUB_TOKEN}")
-                            def branchesArr = httpJson("${apiBase}/branches?per_page=100", "token ${GITHUB_TOKEN}")
+                            def tagsArr = httpJson("${apiBase}/tags", "Bearer ${GITHUB_TOKEN}")
+                            def branchesArr = httpJson("${apiBase}/branches?per_page=100", "Bearer ${GITHUB_TOKEN}")
 
                             def hasMatch = false
                             if (tagsArr.any { tag -> (tag instanceof Map ? tag['name'] : null) == releaseTag }) {
@@ -237,9 +238,9 @@ pipeline {
             }
         }
 
-        /* ------------------------------------------------------------------
+        /* -----------------------------------------------------------------
          * Stage: Scan Repositories in parallel
-         * ------------------------------------------------------------------ */
+         * ----------------------------------------------------------------- */
         stage('Scan Repositories') {
             when { expression { fileExists(env.REPOS_FILE) } }
             steps {
@@ -253,6 +254,7 @@ pipeline {
                         def reposList   = readFile(env.REPOS_FILE).split('\r?\n').findAll { it?.trim() }
 
                         debug("Repos to scan: ${reposList}")
+                        echo "Total repositories found: ${reposList.size()}"
 
                         if (!reposList) {
                             echo 'No repositories to scan.'
@@ -262,19 +264,24 @@ pipeline {
                         if (params.FORCE_RESCAN) {
                             echo 'FORCE_RESCAN=true – clearing status DB'
                             writeFile file: STATUS_DB, text: ''
+                        } else {
+                            echo 'FORCE_RESCAN=false – preserving existing status DB'
                         }
 
                         def statusDb = loadStatus()
                         debug("Loaded status DB keys: ${statusDb.keySet()}")
+                        debug("Status DB contents: ${statusDb}")
                         def tasks    = [:]
                         def IS_UNIX  = isUnix()
                         def cliCmd   = IS_UNIX ? "${env.WORKSPACE}/${CLI_DIR}/cx" : "${env.WORKSPACE}\\${CLI_DIR}\\cx.exe"
 
                         reposList.each { repoName ->
                             def key = "${repoName}|${releaseTag}"
+                            debug("Checking status for key: ${key}")
+                            debug("Status for ${key}: ${statusDb[key]}")
                             if (statusDb[key]?.status == 'Completed') {
                                 echo "✔︎  ${key} already scanned – skipping"
-                                return
+                                return // This return only exits the each loop iteration, not the entire stage
                             }
 
                             tasks[key] = {
@@ -286,28 +293,46 @@ pipeline {
                                         /* -------------------- Clone repo -------------------- */
                                         def cloneUrl = "https://github.com/${githubOrg}/${repoName}.git"
                                         if (IS_UNIX) {
-                                        sh """
-                                            git clone --depth 1 --branch ${releaseTag} ${cloneUrl} . \
-                                                || git clone --depth 1 ${cloneUrl} . && git checkout ${releaseTag}
+                                            sh """
+                                                git clone --depth 1 --branch ${releaseTag} ${cloneUrl} . \
+                                                    || git clone --depth 1 ${cloneUrl} . && git checkout ${releaseTag}
                                             """
                                         } else {
                                             bat """
                                                 git clone --depth 1 --branch ${releaseTag} ${cloneUrl} .  ^
-                                                || git clone --depth 1 ${cloneUrl} . & git checkout ${releaseTag}
+                                                    || git clone --depth 1 ${cloneUrl} . & git checkout ${releaseTag}
                                             """
                                         }
 
-                                        /* -------------------- Trigger scan ------------------- */
+                                        /* -------------------- Trigger scan with report generation ------------------- */
                                         def quote = IS_UNIX ? "'" : ""
                                         // Use env var reference on Windows to avoid Groovy secret interpolation warning
                                         def apiParam = IS_UNIX ? "--apikey ${CX_API_KEY}" : "--apikey %CX_API_KEY%"
+                                        def currentDate = new Date().format('yyyy-MM-dd')
+                                        
+                                        // Try with explicit .pdf extension in output name
+                                        // Step 1: Run the scan without PDF generation
                                         def scanCmd = "${cliCmd} scan create --project-name ${quote}Compliance/${githubOrg}/${repoName}/${releaseTag}${quote} " +
-                                                      "-s . --branch ${quote}${releaseTag}${quote} --tags ${quote}release:${releaseTag}${quote} " +
+                                                      "-s . --branch ${quote}${releaseTag}${quote} --tags ${quote}${releaseTag}${quote} " +
+                                                      "--debug " +
                                                       apiParam
 
+                                        echo "[DEBUG] Executing scan command: ${scanCmd}"
                                         def scanOut = IS_UNIX ?
                                             sh(script: scanCmd, returnStdout: true).trim() :
                                             bat(script: scanCmd, returnStdout: true).trim()
+                                        echo "[DEBUG] Scan command completed. Output length: ${scanOut.length()}"
+                                        
+                                        // Check for any error messages related to PDF generation
+                                        def outputLines = scanOut.readLines()
+                                        def pdfErrors = outputLines.findAll { line ->
+                                            line.toLowerCase().contains('pdf') && 
+                                            (line.toLowerCase().contains('error') || line.toLowerCase().contains('failed') || line.toLowerCase().contains('warning'))
+                                        }
+                                        if (pdfErrors) {
+                                            echo "[DEBUG] Found PDF-related messages in output:"
+                                            pdfErrors.each { echo "[DEBUG]   ${it}" }
+                                        }
 
                                         // Try to extract scanId: first look for JSON, else fall back to UUID pattern
                                         String scanId
@@ -323,6 +348,133 @@ pipeline {
                                         }
                                         if(!scanId) throw new Exception("Unable to parse scan ID from CLI output for ${key}")
                                         echo "✔︎  Scan ${scanId} finished for ${key} (the CLI blocks until completion)"
+                                        
+                                        // Step 2: Generate PDF report using the scan ID
+                                        // Use Jenkins workspace path to ensure PDFs are saved in the main workspace
+                                        def workspacePath = env.WORKSPACE
+                                        echo "[DEBUG] Workspace path: ${workspacePath}"
+                                        
+                                        // Verify workspace directory exists and is writable
+                                        if (!fileExists(workspacePath)) {
+                                            echo "[ERROR] Workspace directory does not exist: ${workspacePath}"
+                                            throw new Exception("Workspace directory not found")
+                                        }
+                                        echo "[DEBUG] Workspace directory exists and is accessible"
+                                        def resultsCmd = "${cliCmd} results show --scan-id ${scanId} " +
+                                                        "--report-format pdf " +
+                                                        "--report-pdf-email ${params.EMAIL_RECIPIENT} " +
+                                                        "--report-pdf-options ScanSummary,ScanResults " +
+                                                        "--output-name ${quote}${repoName}_${releaseTag}_${currentDate}${quote} " +
+                                                        "--output-path ${quote}${workspacePath}${quote} " +
+                                                        "--debug " +
+                                                        apiParam
+                                        
+                                        echo "[DEBUG] Generating PDF report with command: ${resultsCmd}"
+                                        echo "[DEBUG] PDF will be saved to: ${env.WORKSPACE}/${repoName}_${releaseTag}_${currentDate}.pdf"
+                                        def resultsOut = IS_UNIX ?
+                                            sh(script: resultsCmd, returnStdout: true).trim() :
+                                            bat(script: resultsCmd, returnStdout: true).trim()
+                                        echo "[DEBUG] Results command completed. Output length: ${resultsOut.length()}"
+                                        
+                                        // Check for any error messages related to PDF generation
+                                        def resultsLines = resultsOut.readLines()
+                                        def resultsPdfErrors = resultsLines.findAll { line ->
+                                            line.toLowerCase().contains('pdf') && 
+                                            (line.toLowerCase().contains('error') || line.toLowerCase().contains('failed') || line.toLowerCase().contains('warning'))
+                                        }
+                                        if (resultsPdfErrors) {
+                                            echo "[DEBUG] Found PDF-related messages in results output:"
+                                            resultsPdfErrors.each { echo "[DEBUG]   ${it}" }
+                                        }
+                                        
+                                        echo "📧 PDF report generation completed for scan ${scanId}"
+                                        
+                                        // Archive the generated PDF report if it exists
+                                        def reportFile = "${repoName}_${releaseTag}_${currentDate}.pdf"
+                                        
+                                        // Wait a moment for file system to sync after results command
+                                        sleep(5)
+                                        
+                                        // Check current working directory and workspace
+                                        def pwd = IS_UNIX ?
+                                            sh(script: "pwd", returnStdout: true).trim() :
+                                            bat(script: "cd", returnStdout: true).trim()
+                                        echo "[DEBUG] Current working directory: ${pwd}"
+                                        echo "[DEBUG] Jenkins workspace: ${env.WORKSPACE}"
+                                        
+                                        // Enhanced PDF file detection and archiving
+                                        def allPdfFiles = []
+                                        
+                                        // First, list all PDF files in workspace for debugging
+                                        if (IS_UNIX) {
+                                            def pdfFiles = sh(script: "find ${env.WORKSPACE} -name '*.pdf' -type f 2>/dev/null", returnStdout: true).trim()
+                                            if (pdfFiles) {
+                                                allPdfFiles = pdfFiles.readLines()
+                                                echo "[DEBUG] All PDF files found in workspace:"
+                                                allPdfFiles.each { echo "[DEBUG]   ${it}" }
+                                            } else {
+                                                echo "[DEBUG] No PDF files found in workspace"
+                                            }
+                                        } else {
+                                            def pdfFiles = bat(script: "dir ${env.WORKSPACE}\\*.pdf /b 2>nul", returnStdout: true).trim()
+                                            if (pdfFiles && !pdfFiles.contains("File Not Found")) {
+                                                allPdfFiles = pdfFiles.readLines()
+                                                echo "[DEBUG] All PDF files found in workspace:"
+                                                allPdfFiles.each { echo "[DEBUG]   ${it}" }
+                                            } else {
+                                                echo "[DEBUG] No PDF files found in workspace"
+                                            }
+                                        }
+                                        
+                                        // Try to find and archive the specific report file
+                                        def targetFile = null
+                                        def possibleNames = [
+                                            reportFile,
+                                            "${repoName}_${releaseTag}_${currentDate}",
+                                            "cx_result.pdf",
+                                            "${repoName}_${releaseTag}_${currentDate}_report.pdf",
+                                            "${repoName}_${releaseTag}_${currentDate}_results.pdf"
+                                        ]
+                                        
+                                        // Check for exact matches first
+                                        for (def name : possibleNames) {
+                                            if (fileExists("${env.WORKSPACE}/${name}")) {
+                                                targetFile = name
+                                                break
+                                            }
+                                        }
+                                        
+                                        // If no exact match, look for files containing the repo name and date
+                                        if (!targetFile) {
+                                            for (def pdfFile : allPdfFiles) {
+                                                def fileName = new File(pdfFile).getName()
+                                                if (fileName.contains(repoName) && fileName.contains(currentDate)) {
+                                                    targetFile = fileName
+                                                    break
+                                                }
+                                            }
+                                        }
+                                        
+                                        // If still no match, try any PDF file that might be our report
+                                        if (!targetFile && allPdfFiles.size() > 0) {
+                                            // Get the most recently modified PDF file
+                                            def latestPdf = allPdfFiles.max { file ->
+                                                new File(file).lastModified()
+                                            }
+                                            targetFile = new File(latestPdf).getName()
+                                            echo "[DEBUG] Using most recent PDF file as fallback: ${targetFile}"
+                                        }
+                                        
+                                        if (targetFile) {
+                                            def fileSize = new File("${env.WORKSPACE}/${targetFile}").length()
+                                            echo "[ARCHIVE] Archiving PDF report: ${targetFile} (size: ${fileSize} bytes)"
+                                            archiveArtifacts artifacts: targetFile, fingerprint: true
+                                            echo "[OK] PDF report archived successfully"
+                                        } else {
+                                            echo "[WARN] PDF report file not found: ${reportFile}"
+                                            echo "[DEBUG] Checked possible names: ${possibleNames.join(', ')}"
+                                            echo "[DEBUG] Total PDF files in workspace: ${allPdfFiles.size()}"
+                                        }
 
                                         statusDb[key] = [
                                             repo   : repoName,
@@ -340,316 +492,77 @@ pipeline {
                             }
                         }
 
-                        if (tasks) { parallel tasks }
-                        else       { echo 'Nothing to scan after filtering.' }
+                        echo "Tasks to execute: ${tasks.size()}"
+                        if (tasks) { 
+                            echo "Executing ${tasks.size()} parallel scan tasks..."
+                            parallel tasks 
+                        }
+                        else { 
+                            echo 'Nothing to scan after filtering.' 
+                        }
 
+                        debug("Saving status DB with keys: ${statusDb.keySet()}")
                         saveStatus(statusDb)
+                        
+                        // Summary of processing
+                        def completedCount = statusDb.values().count { it.status == 'Completed' }
+                        def failedCount = statusDb.values().count { it.status == 'Failed' }
+                        echo "=== SCAN SUMMARY ==="
+                        echo "Total repositories found: ${reposList.size()}"
+                        echo "Repositories processed: ${tasks.size()}"
+                        echo "Successfully completed: ${completedCount}"
+                        echo "Failed: ${failedCount}"
+                        echo "==================="
                     }
                 }
             }
         }
 
-        stage('Generate Consolidated PDF') {
-            when { expression { fileExists(STATUS_DB) } }
-            steps {
-                withCredentials([
-                    string(credentialsId: 'cx-api-key', variable: 'CX_API_KEY')
-                ]) {
-                    script {
-                        def statusDb = loadStatus()
-                        def completed = statusDb.findAll { k,v -> v.status == 'Completed' }
-                        if (!completed) {
-                            echo 'No finished scans – skipping report.'
-                            return
-                        }
-                        def scanIds = completed.collect { it.value.scanId }
-                        scanIds = scanIds.unique()
-                        debug("ScanIds going into report: ${scanIds}")
 
-                        /* ------------------ Get OAuth access token ------------------ */
-                        def ACCESS_TOKEN = getCxAccessToken(CX_API_KEY)
-
-                        /* ------------------ Get project IDs from scan IDs ------------------ */
-                        def projectIds = []
-                        scanIds.each { scanId ->
-                            try {
-                                def scanInfo = httpJson("${params.CX_BASE_URL}/api/scans/${scanId}", "Bearer ${ACCESS_TOKEN}", 'GET')
-                                if (scanInfo.projectId) {
-                                    projectIds.add(scanInfo.projectId)
-                                    debug("Scan ${scanId} -> Project ${scanInfo.projectId}")
-                                }
-                            } catch (Exception e) {
-                                debug("Could not get project ID for scan ${scanId}: ${e.message}")
-                            }
-                        }
-                        
-                        def entityType
-                        def finalIds
-                        if (!projectIds) {
-                            echo "Could not resolve project IDs from scans. Using scan IDs instead."
-                            finalIds = scanIds
-                            entityType = "scan"
-                        } else {
-                            finalIds = projectIds.unique()
-                            entityType = "project"
-                        }
-                        
-                        def quotedIds = finalIds.collect { '"'+it+'"' }
-                        debug("Final IDs going into report: ${finalIds}")
-
-                        /* ------------------ Generate Consolidated Report via CLI ---------------------- */
-                        
-                        // Generate consolidated report using Checkmarx ONE API
-                        echo "Generating consolidated report via API for ${finalIds.size()} ${entityType}(s)..."
-                        echo "${entityType.capitalize()} IDs: ${finalIds.join(', ')}"
-                        
-                        // Create a clean filename for the consolidated report
-                        def currentDate = new Date().format('yyyy-MM-dd')
-                        def consolidatedFilename = "${params.BRANCH_OR_TAG}_${currentDate}_Consolidated"
-                        def consolidatedReportFile = "${consolidatedFilename}.${params.CX_REPORT_FORMAT}"
-                        
-                        // Prepare the API request payload for consolidated report with email delivery
-                        def payloadJson = """
-                        {
-                            "reportName": "improved-project-report",
-                            "fileFormat": "${params.CX_REPORT_FORMAT.toLowerCase()}",
-                            "reportFilename": "${consolidatedFilename}",
-                            "sections": ["projects-overview", "total-vulnerabilities-overview", "vulnerabilities-insights"],
-                            "entities": [
-                                {
-                                    "entity": "project",
-                                    "ids": [${quotedIds.join(',')}],
-                                    "tags": []
-                                }
-                            ],
-                            "filters": {
-                                "scanners": ["sast", "iac", "sca"],
-                                "severities": ["critical", "high", "medium"],
-                                "states": ["to-verify", "confirmed", "urgent"],
-                                "status": ["new", "recurrent"]
-                            },
-                            "reportType": "ui",
-                            "emails": ["${params.EMAIL_RECIPIENT}"]
-                        }
-                        """.trim()
-                        
-                        debug("API Payload for consolidated report: ${payloadJson}")
-                        
-                        // Retry logic for report creation
-                        def maxRetries = 3
-                        def retryDelay = 30 // 30 seconds between retries
-                        def reportResponse = null
-                        def reportId = null
-                        
-                        try {
-                            // Check if we need to refresh the access token (it might have expired)
-                            echo "[AUTH] Verifying access token is still valid..."
-                            try {
-                                // tokenTest variable line removed – call is used only for verification
-                                httpJson(
-                                    "${params.CX_BASE_URL}/api/projects",
-                                    "Bearer ${ACCESS_TOKEN}",
-                                    'GET',
-                                    null,
-                                    ['Accept': 'application/json, text/plain, */*']
-                                )
-                                echo "[OK] Access token is valid"
-                            } catch (Exception e) {
-                                echo "[WARN] Access token may have expired, refreshing..."
-                                ACCESS_TOKEN = getCxAccessToken(CX_API_KEY)
-                                echo "[OK] Access token refreshed"
-                            }
-                            
-                            for (int attempt = 1; attempt <= maxRetries; attempt++) {
-                                try {
-                                    echo "[RETRY] Attempt ${attempt}/${maxRetries}: Creating consolidated report..."
-                                    
-                                    // Make API call to create consolidated report
-                                    reportResponse = httpJson(
-                                        "${params.CX_BASE_URL}/api/reports/v2",
-                                        "Bearer ${ACCESS_TOKEN}",
-                                        'POST',
-                                        payloadJson,
-                                        ['Content-Type': 'application/json; version=2.0', 'Accept': 'application/json, text/plain, */*']
-                                    )
-                                    
-                                    if (reportResponse?.reportId) {
-                                        reportId = reportResponse.reportId
-                                        echo "[OK] Consolidated report created with ID: ${reportId} (attempt ${attempt})"
-                                        break
-                                    } else {
-                                        echo "[WARN] No report ID returned from API (attempt ${attempt})"
-                                        if (attempt < maxRetries) {
-                                            echo "[WAIT] Waiting ${retryDelay} seconds before retry..."
-                                            sleep(retryDelay)
-                                        }
-                                    }
-                                } catch (Exception e) {
-                                    echo "[ERROR] Failed to create consolidated report (attempt ${attempt}): ${e.message}"
-                                    if (attempt < maxRetries) {
-                                        echo "[WAIT] Waiting ${retryDelay} seconds before retry..."
-                                        sleep(retryDelay)
-                                    } else {
-                                        throw e // Re-throw on final attempt
-                                    }
-                                }
-                            }
-                            
-                            if (!reportId) {
-                                echo "[ERROR] Failed to create consolidated report after ${maxRetries} attempts"
-                                return
-                            }
-                            
-                            echo "[OK] Consolidated report created with ID: ${reportId}"
-                            
-                            // Wait for report to be generated and sent via email
-                            echo "[WAIT] Waiting for consolidated report generation and email delivery..."
-                            def maxWaitTime = 600 // 10 minutes (increased from 5)
-                            def waitInterval = 10 // 10 seconds
-                            def waited = 0
-                            def reportCompleted = false
-                            
-                            while (waited < maxWaitTime && !reportCompleted) {
-                                echo "[WAIT] Checking report status (waited ${waited}s, max ${maxWaitTime}s)..."
-                                sleep(waitInterval)
-                                waited += waitInterval
-                                
-                                // Retry logic for status check
-                                def statusResponse = null
-                                def statusCheckRetries = 3
-                                def statusCheckRetryDelay = 5 // 5 seconds between retries
-                                
-                                for (int statusAttempt = 1; statusAttempt <= statusCheckRetries; statusAttempt++) {
-                                    try {
-                                        // Check report status
-                                        echo "[CHECK] Checking status for report ID: ${reportId} (attempt ${statusAttempt}/${statusCheckRetries})"
-                                        statusResponse = httpJson(
-                                            "${params.CX_BASE_URL}/api/reports/${reportId}",
-                                            "Bearer ${ACCESS_TOKEN}",
-                                            'GET',
-                                            null,
-                                            ['Accept': '*/*; version=1.0']
-                                        )
-                                        
-                                        debug("Report status: ${statusResponse}")
-                                        echo "[STATUS] Current status: ${statusResponse?.status || 'Unknown'}"
-                                        
-                                        if (statusResponse) {
-                                            break // Success, exit retry loop
-                                        } else {
-                                            echo "[WARN] No status response received (attempt ${statusAttempt})"
-                                            if (statusAttempt < statusCheckRetries) {
-                                                echo "[WAIT] Waiting ${statusCheckRetryDelay} seconds before retry..."
-                                                sleep(statusCheckRetryDelay)
-                                            }
-                                        }
-                                    } catch (Exception e) {
-                                        echo "[ERROR] Status check failed (attempt ${statusAttempt}): ${e.message}"
-                                        if (statusAttempt < statusCheckRetries) {
-                                            echo "[WAIT] Waiting ${statusCheckRetryDelay} seconds before retry..."
-                                            sleep(statusCheckRetryDelay)
-                                        } else {
-                                            echo "[WARN] All status check attempts failed, will try again in next polling cycle"
-                                            statusResponse = null
-                                        }
-                                    }
-                                }
-                                
-                                if (!statusResponse) {
-                                    echo "[WARN] No status response received after ${statusCheckRetries} attempts - will retry in next cycle"
-                                    continue
-                                }
-                                
-                                if (statusResponse?.status == 'completed') {
-                                    echo "[OK] Consolidated report generation completed successfully!"
-                                    echo "[EMAIL] Report has been sent to: ${params.EMAIL_RECIPIENT}"
-                                    echo "[INFO] Report ID: ${reportId}"
-                                    echo "[INFO] Report filename: ${statusResponse.filename || consolidatedReportFile}"
-                                    
-                                    // Download the report using the web UI download URL
-                                    try {
-                                        def downloadUrl = "${params.CX_BASE_URL}/reports/download?reportId=${reportId}"
-                                        def reportFilename = statusResponse.filename ? statusResponse.filename : consolidatedReportFile
-                                        
-                                        echo "[DOWNLOAD] Downloading consolidated report via web UI..."
-                                        echo "[URL] ${downloadUrl}"
-                                        
-                                        // Download using the web UI endpoint (requires authentication)
-                                        downloadFile(
-                                            downloadUrl,
-                                            reportFilename,
-                                            "Bearer ${ACCESS_TOKEN}",
-                                            ['Accept': 'application/pdf, application/octet-stream']
-                                        )
-                                        
-                                        if (fileExists(reportFilename)) {
-                                            def fileSize = new File(reportFilename).length()
-                                            echo "[OK] Consolidated report downloaded: ${reportFilename} (size: ${fileSize} bytes)"
-                                            
-                                            // Archive the downloaded report
-                                            echo "[ARCHIVE] Archiving consolidated report..."
-                                            archiveArtifacts artifacts: reportFilename, fingerprint: true
-                                            echo "[OK] Consolidated report archived successfully"
-                                        } else {
-                                            echo "[WARN] Consolidated report file not found after download"
-                                        }
-                                    } catch (Exception e) {
-                                        echo "[WARN] Failed to download report: ${e.message}"
-                                        echo "[INFO] Report is still available via email and in Checkmarx ONE console"
-                                    }
-                                    
-                                    reportCompleted = true
-                                    break
-                                } else if (['processing','pending','started','ready'].contains(statusResponse?.status)) {
-                                    echo "[WAIT] Report is still processing: ${statusResponse.status}"
-                                } else if (statusResponse?.status == 'failed') {
-                                    echo "[ERROR] Consolidated report generation failed: ${statusResponse.error || 'Unknown error'}"
-                                    break
-                                } else {
-                                    echo "[WAIT] Consolidated report status: ${statusResponse?.status || 'Unknown'}"
-                                    // If we get an unexpected status, log it but continue polling
-                                    if (statusResponse?.status && !['completed', 'failed', 'processing', 'pending'].contains(statusResponse.status)) {
-                                        echo "[WARN] Unexpected status received: ${statusResponse.status}"
-                                    }
-                                }
-                            }
-                        } // End of try block
-                        catch (Exception e) { // Exception handling
-                            echo "[ERROR] Failed to create consolidated report: ${e.message}"
-                        }
-                    
-                    // Send email notification about report completion
-                    if (params.EMAIL_RECIPIENT) {
-                        echo "[EMAIL] Sending notification to ${params.EMAIL_RECIPIENT}..."
-                        try {
-                            emailext(
-                                subject: "Consolidated Security Report – ${params.BRANCH_OR_TAG}",
-                                body: "The consolidated security report for branch/tag '${params.BRANCH_OR_TAG}' has been generated and sent via email.\n\nReport ID: ${reportId}\nReport filename: ${consolidatedReportFile}\n\nPlease check your email for the report attachment.",
-                                to: "${params.EMAIL_RECIPIENT}",
-                                mimeType: 'text/plain'
-                            )
-                            echo "[EMAIL] Notification email sent successfully"
-                        } catch (e) {
-                            echo "[WARN] Failed to send email: ${e.message}"
-                        }
-                    }
-                    
-                    echo "[OK] Consolidated report generation completed successfully"
-                    
-                    } // End of script block
-                }
-            }
-        }
     }
 
     post {
-        always { echo '[FINISH] Compliance pipeline finished.' }
+        always { 
+            echo '[FINISH] Compliance pipeline finished.'
+            
+            // Archive any remaining PDF files in workspace
+            script {
+                def IS_UNIX = isUnix()
+                if (IS_UNIX) {
+                    def pdfFiles = sh(script: "find ${env.WORKSPACE} -name '*.pdf' -type f 2>/dev/null", returnStdout: true).trim()
+                    if (pdfFiles) {
+                        def files = pdfFiles.readLines()
+                        echo "[POST] Found ${files.size()} PDF files to archive:"
+                        files.each { file ->
+                            def fileName = new File(file).getName()
+                            echo "[POST] Archiving: ${fileName}"
+                            archiveArtifacts artifacts: fileName, fingerprint: true
+                        }
+                    } else {
+                        echo "[POST] No PDF files found in workspace"
+                    }
+                } else {
+                    def pdfFiles = bat(script: "dir ${env.WORKSPACE}\\*.pdf /b 2>nul", returnStdout: true).trim()
+                    if (pdfFiles && !pdfFiles.contains("File Not Found")) {
+                        def files = pdfFiles.readLines()
+                        echo "[POST] Found ${files.size()} PDF files to archive:"
+                        files.each { file ->
+                            def fileName = new File(file).getName()
+                            echo "[POST] Archiving: ${fileName}"
+                            archiveArtifacts artifacts: fileName, fingerprint: true
+                        }
+                    } else {
+                        echo "[POST] No PDF files found in workspace"
+                    }
+                }
+            }
+        }
     }
 }
 
-/* ------------------------------------------------------------------------ */
-/* ---------------------------- Helper methods ---------------------------- */
-/* ------------------------------------------------------------------------ */
+/* ----------------------------------------------------------------------- */
+/* ---------------------------- Helper methods --------------------------- */
+/* ----------------------------------------------------------------------- */
 
 /* Lightweight HTTP JSON wrapper */
 // Extended: extraHeaders allows us to include Accept or other headers; authHeader may be null
@@ -666,8 +579,8 @@ def httpJson(String url, String authHeader=null, String method = 'GET', String b
             cmd.add(cmd.size()-1, '-d')
             cmd.add(cmd.size()-1, body.replace('"', '\"'))
         }
-        // Redact the auth header before printing to avoid Jenkins warnings
-        def curlCmd = cmd.collect { it.startsWith('-H') && it.contains('Authorization:') ? '-H Authorization: ***' : it }.join(' ')
+        // Redact the auth header before printing to avoid Jenkins arnings
+        def curlCmd = cmd.collect { it.startsWith('-H') && it.contans('Authorization:') ? '-H Authorization: ***' : it }.join(' ')
         debug("curl command: ${curlCmd}")
         def raw
         try {
@@ -680,7 +593,7 @@ def httpJson(String url, String authHeader=null, String method = 'GET', String b
         debug("Response from ${url}: ${raw.take(500)} …")
         return toSerializable( safeParse(raw) )
     } else {
-        // Build PowerShell script line-by-line to avoid Groovy/DSL parsing issues
+        // Build PowerShell script line-by-line to avoid Groovy/DSLparsing issues
         def encodedBody = body ? body.replace("'", "''") : ''
         def psLines = []
         psLines << "\$ProgressPreference='SilentlyContinue'"
@@ -793,11 +706,19 @@ def loadStatus() {
             def parts = line.split('=', 2)
             if (parts.size() == 2) {
                 def key = parts[0]
-                def rest = parts[1].split('\\|', 3)
+                def rest = parts[1].split('\\|', 5) // Support up to 5 fields: scanId|status|projectId|repo|tag
                 def scan = rest.size() > 0 ? rest[0] : ''
                 def status = rest.size() > 1 ? rest[1] : ''
                 def proj = rest.size() > 2 ? rest[2] : ''
-                m[key] = [ scanId: scan, status: status, projectId: proj ]
+                def repo = rest.size() > 3 ? rest[3] : ''
+                def tag = rest.size() > 4 ? rest[4] : ''
+                m[key] = [ 
+                    scanId: scan, 
+                    status: status, 
+                    projectId: proj,
+                    repo: repo,
+                    tag: tag
+                ]
             }
         }
     }
@@ -805,7 +726,9 @@ def loadStatus() {
 }
 
 def saveStatus(m) {
-    def lines = m.collect { k, v -> "${k}=${v.scanId ?: ''}|${v.status}|${v.projectId ?: ''}" }
+    def lines = m.collect { k, v -> 
+        "${k}=${v.scanId ?: ''}|${v.status}|${v.projectId ?: ''}|${v.repo ?: ''}|${v.tag ?: ''}" 
+    }
     writeFile file: STATUS_DB, text: lines.join('\n')
 }
 
@@ -816,7 +739,7 @@ def debug(msg) {
     }
 }
 
-/* Convert LazyMap / GPathResult into plain LinkedHashMap so it’s Serializable */
+/* Convert LazyMap / GPathResult into plain LinkedHashMap so it's Serializable */
 @NonCPS
 def toSerializable(obj) {
     if (obj instanceof Map) {
@@ -836,52 +759,52 @@ def safeParse(raw) {
 }
 
 /* ------------------------------------------------------------- */
-        /* Extract tenant name from API key */
-        def extractTenantFromApiKey(String apiKey) {
-            // Try to extract tenant from JWT token without using decodeBase64
-            try {
-                // API keys are often JWT tokens that contain tenant info
-                def parts = apiKey.split('\\.')
-                if (parts.length >= 2) {
-                    def payload = parts[1]
+/* Extract tenant name from API key */
+def extractTenantFromApiKey(String apiKey) {
+    // Try to extract tenant from JWT token without using decodeBase64
+    try {
+        // API keys are often JWT tokens that contain tenant info
+        def parts = apiKey.split('\\.')
+        if (parts.length >= 2) {
+            def payload = parts[1]
 
-                    // Use shell command to decode base64 (sandbox-safe)
-                    def decoded
-                    if (isUnix()) {
-                        decoded = sh(script: "echo '${payload}' | base64 -d", returnStdout: true).trim()
-                    } else {
-                        // Write to temp file and decode (certutil needs input/output files)
-                        writeFile file: 'temp_payload.txt', text: payload
-                        // Remove existing output file if it exists and decode
-                        decoded = bat(script: "if exist temp_decoded.txt del temp_decoded.txt && certutil -decode temp_payload.txt temp_decoded.txt", returnStdout: true).trim()
-                        decoded = readFile('temp_decoded.txt').trim()
-                        
-                        // Clean up temporary files immediately
-                        bat(script: "if exist temp_payload.txt del temp_payload.txt && if exist temp_decoded.txt del temp_decoded.txt", returnStdout: true)
-                    }
-
-                    def json = new groovy.json.JsonSlurper().parseText(decoded)
-
-                    // Look for tenant in common JWT fields
-                    if (json.tenant) return json.tenant
-                    if (json.realm) return json.realm
-                    if (json.iss && json.iss.contains('/realms/')) {
-                        def realmMatch = json.iss =~ /\/realms\/([^\/]+)/
-                        if (realmMatch) return realmMatch[0][1]
-                    }
-                }
-            } catch (Exception e) {
-                debug("Could not extract tenant from API key: ${e.message}")
+            // Use shell command to decode base64 (sandbox-safe)
+            def decoded
+            if (isUnix()) {
+                decoded = sh(script: "echo '${payload}' | base64 -d", returnStdout: true).trim()
+            } else {
+                // Write to temp file and decode (certutil needs input/output files)
+                writeFile file: 'temp_payload.txt', text: payload
+                // Remove existing output file if it exists and decode
+                decoded = bat(script: "if exist temp_decoded.txt del temp_decoded.txt && certutil -decode temp_payload.txt temp_decoded.txt", returnStdout: true).trim()
+                decoded = readFile('temp_decoded.txt').trim()
+                
+                // Clean up temporary files immediately
+                bat(script: "if exist temp_payload.txt del temp_payload.txt && if exist temp_decoded.txt del temp_decoded.txt", returnStdout: true)
             }
 
-            // Fallback: try to extract from API key format or use parameter
-            if (apiKey.contains('workshop')) return 'workshop'
-            if (apiKey.contains('ast-realm')) return 'ast-realm'
-            if (apiKey.contains('ast-app')) return 'ast-app'
+            def json = new groovy.json.JsonSlurper().parseText(decoded)
 
-            // Default fallback: use parameter or default to workshop
-            return params.CX_DEFAULT_TENANT ?: 'workshop'
+            // Look for tenant in common JWT fields
+            if (json.tenant) return json.tenant
+            if (json.realm) return json.realm
+            if (json.iss && json.iss.contains('/realms/')) {
+                def realmMatch = json.iss =~ /\/realms\/([^\/]+)/
+                if (realmMatch) return realmMatch[0][1]
+            }
         }
+    } catch (Exception e) {
+        debug("Could not extract tenant from API key: ${e.message}")
+    }
+
+    // Fallback: try to extract from API key format or use parameter
+    if (apiKey.contains('workshop')) return 'workshop'
+    if (apiKey.contains('ast-realm')) return 'ast-realm'
+    if (apiKey.contains('ast-app')) return 'ast-app'
+
+    // Default fallback: use parameter or default to workshop
+    return params.CX_DEFAULT_TENANT ?: 'workshop'
+}
 
 /* Retrieve short-lived OAuth access token using API key */
 def getCxAccessToken(String apiKey) {
@@ -902,18 +825,18 @@ def getCxAccessToken(String apiKey) {
         } else {
             /* Fall back to PowerShell Invoke-RestMethod */
             def ps = """
- \$ProgressPreference='SilentlyContinue';
- \$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
- \$headers.Add("Content-Type", "application/x-www-form-urlencoded")
- \$body = "grant_type=refresh_token&client_id=${params.CX_OAUTH_CLIENT_ID}&refresh_token=" + \$Env:CX_API_KEY
- try {
-     \$resp = Invoke-RestMethod -Uri '${tokenUrl}' -Method Post -Headers \$headers -Body \$body -MaximumRedirection 5 -ErrorAction Stop;
-     \$resp | ConvertTo-Json -Compress
- } catch {
-     Write-Error "Token request failed: \$(\$_.Exception.Message)"
-     exit 1
- }
- """
+\$ProgressPreference='SilentlyContinue';
+\$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+\$headers.Add("Content-Type", "application/x-www-form-urlencoded")
+\$body = "grant_type=refresh_token&client_id=${params.CX_OAUTH_CLIENT_ID}&refresh_token=" + \$Env:CX_API_KEY
+try {
+    \$resp = Invoke-RestMethod -Uri '${tokenUrl}' -Method Post -Headers \$headers -Body \$body -MaximumRedirection 5 -ErrorAction Stop;
+    \$resp | ConvertTo-Json -Compress
+} catch {
+    Write-Error "Token request failed: \$(\$_.Exception.Message)"
+    exit 1
+}
+"""
             raw = powershell(script: ps, returnStdout: true).trim()
         }
         return new groovy.json.JsonSlurper().parseText(raw).access_token
