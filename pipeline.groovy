@@ -53,7 +53,7 @@ pipeline {
 
         string(
             name: 'CLI_VERSION',
-            defaultValue: '2.0.58',
+            defaultValue: '2.3.28',
             description: 'Checkmarx ONE CLI version to download'
         )
         string(
