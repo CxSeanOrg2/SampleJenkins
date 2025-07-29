@@ -274,6 +274,18 @@ pipeline {
                         def tasks    = [:]
                         def IS_UNIX  = isUnix()
                         def cliCmd   = IS_UNIX ? "${env.WORKSPACE}/${CLI_DIR}/cx" : "${env.WORKSPACE}\\${CLI_DIR}\\cx.exe"
+                        
+                        // Test CLI availability
+                        echo "[DEBUG] Testing CLI availability: ${cliCmd}"
+                        try {
+                            def cliTest = IS_UNIX ?
+                                sh(script: "${cliCmd} --help", returnStdout: true).trim() :
+                                bat(script: "${cliCmd} --help", returnStdout: true).trim()
+                            echo "[DEBUG] CLI help output (first 200 chars): ${cliTest.take(200)}"
+                        } catch (Exception e) {
+                            echo "[ERROR] CLI test failed: ${e.message}"
+                            throw new Exception("CLI not available or not working: ${e.message}")
+                        }
 
                         reposList.each { repoName ->
                             def key = "${repoName}|${releaseTag}"
@@ -318,10 +330,19 @@ pipeline {
                                                       apiParam
 
                                         echo "[DEBUG] Executing scan command: ${scanCmd}"
-                                        def scanOut = IS_UNIX ?
-                                            sh(script: scanCmd, returnStdout: true).trim() :
-                                            bat(script: scanCmd, returnStdout: true).trim()
-                                        echo "[DEBUG] Scan command completed. Output length: ${scanOut.length()}"
+                                        def scanOut
+                                        try {
+                                            scanOut = IS_UNIX ?
+                                                sh(script: scanCmd, returnStdout: true).trim() :
+                                                bat(script: scanCmd, returnStdout: true).trim()
+                                            echo "[DEBUG] Scan command completed. Output length: ${scanOut.length()}"
+                                            echo "[DEBUG] Scan command output (first 1000 chars): ${scanOut.take(1000)}"
+                                        } catch (Exception e) {
+                                            echo "[ERROR] Scan command failed: ${e.message}"
+                                            echo "[ERROR] Full error details: ${e.toString()}"
+                                            echo "[ERROR] Error class: ${e.getClass().getName()}"
+                                            throw e
+                                        }
                                         
                                         // Check for any error messages related to PDF generation
                                         def outputLines = scanOut.readLines()
@@ -346,7 +367,11 @@ pipeline {
                                             def m = (scanOut =~ /[0-9a-fA-F-]{36}/)
                                             if (m) scanId = m[0]
                                         }
-                                        if(!scanId) throw new Exception("Unable to parse scan ID from CLI output for ${key}")
+                                        if(!scanId) {
+                                            echo "[ERROR] Unable to parse scan ID from CLI output for ${key}"
+                                            echo "[ERROR] Full scan output: ${scanOut}"
+                                            throw new Exception("Unable to parse scan ID from CLI output for ${key}. Output length: ${scanOut.length()}")
+                                        }
                                         echo "✔︎  Scan ${scanId} finished for ${key} (the CLI blocks until completion)"
                                         
                                         // Step 2: Generate PDF report using the scan ID
@@ -371,10 +396,19 @@ pipeline {
                                         
                                         echo "[DEBUG] Generating PDF report with command: ${resultsCmd}"
                                         echo "[DEBUG] PDF will be saved to: ${env.WORKSPACE}/${repoName}_${releaseTag}_${currentDate}.pdf"
-                                        def resultsOut = IS_UNIX ?
-                                            sh(script: resultsCmd, returnStdout: true).trim() :
-                                            bat(script: resultsCmd, returnStdout: true).trim()
-                                        echo "[DEBUG] Results command completed. Output length: ${resultsOut.length()}"
+                                        def resultsOut
+                                        try {
+                                            resultsOut = IS_UNIX ?
+                                                sh(script: resultsCmd, returnStdout: true).trim() :
+                                                bat(script: resultsCmd, returnStdout: true).trim()
+                                            echo "[DEBUG] Results command completed. Output length: ${resultsOut.length()}"
+                                            echo "[DEBUG] Results command output (first 1000 chars): ${resultsOut.take(1000)}"
+                                        } catch (Exception e) {
+                                            echo "[ERROR] Results command failed: ${e.message}"
+                                            echo "[ERROR] Full error details: ${e.toString()}"
+                                            echo "[ERROR] Error class: ${e.getClass().getName()}"
+                                            throw e
+                                        }
                                         
                                         // Check for any error messages related to PDF generation
                                         def resultsLines = resultsOut.readLines()
@@ -484,6 +518,10 @@ pipeline {
                                             status : 'Completed'
                                         ]
                                     } catch (e) {
+                                        echo "[ERROR] Scan failed for ${key}: ${e}"
+                                        echo "[ERROR] Error type: ${e.getClass().getName()}"
+                                        echo "[ERROR] Error message: ${e.message}"
+                                        echo "[ERROR] Full error: ${e.toString()}"
                                         statusDb[key] = [ repo: repoName, tag: releaseTag,
                                                           status: 'Failed', error: e.toString() ]
                                         echo "✖︎  Scan failed for ${key}: ${e}"
@@ -495,6 +533,7 @@ pipeline {
                         echo "Tasks to execute: ${tasks.size()}"
                         if (tasks) { 
                             echo "Executing ${tasks.size()} parallel scan tasks..."
+                            echo "[DEBUG] Task keys: ${tasks.keySet()}"
                             parallel tasks 
                         }
                         else { 
@@ -529,30 +568,41 @@ pipeline {
             script {
                 def IS_UNIX = isUnix()
                 if (IS_UNIX) {
-                    def pdfFiles = sh(script: "find ${env.WORKSPACE} -name '*.pdf' -type f 2>/dev/null", returnStdout: true).trim()
-                    if (pdfFiles) {
-                        def files = pdfFiles.readLines()
-                        echo "[POST] Found ${files.size()} PDF files to archive:"
-                        files.each { file ->
-                            def fileName = new File(file).getName()
-                            echo "[POST] Archiving: ${fileName}"
-                            archiveArtifacts artifacts: fileName, fingerprint: true
+                    try {
+                        def pdfFiles = sh(script: "find ${env.WORKSPACE} -name '*.pdf' -type f 2>/dev/null", returnStdout: true).trim()
+                        if (pdfFiles) {
+                            def files = pdfFiles.readLines()
+                            echo "[POST] Found ${files.size()} PDF files to archive:"
+                            files.each { file ->
+                                def fileName = new File(file).getName()
+                                echo "[POST] Archiving: ${fileName}"
+                                archiveArtifacts artifacts: fileName, fingerprint: true
+                            }
+                        } else {
+                            echo "[POST] No PDF files found in workspace"
                         }
-                    } else {
-                        echo "[POST] No PDF files found in workspace"
+                    } catch (Exception e) {
+                        echo "[POST] Error listing PDF files: ${e.message}"
+                        echo "[POST] This is expected if no PDF files exist"
                     }
                 } else {
-                    def pdfFiles = bat(script: "dir ${env.WORKSPACE}\\*.pdf /b 2>nul", returnStdout: true).trim()
-                    if (pdfFiles && !pdfFiles.contains("File Not Found")) {
-                        def files = pdfFiles.readLines()
-                        echo "[POST] Found ${files.size()} PDF files to archive:"
-                        files.each { file ->
-                            def fileName = new File(file).getName()
-                            echo "[POST] Archiving: ${fileName}"
-                            archiveArtifacts artifacts: fileName, fingerprint: true
+                    try {
+                        // Use a more robust Windows command that won't fail if no files exist
+                        def pdfFiles = bat(script: "if exist ${env.WORKSPACE}\\*.pdf (dir ${env.WORKSPACE}\\*.pdf /b) else (echo NO_FILES)", returnStdout: true).trim()
+                        if (pdfFiles && !pdfFiles.contains("NO_FILES") && !pdfFiles.contains("File Not Found")) {
+                            def files = pdfFiles.readLines()
+                            echo "[POST] Found ${files.size()} PDF files to archive:"
+                            files.each { file ->
+                                def fileName = new File(file).getName()
+                                echo "[POST] Archiving: ${fileName}"
+                                archiveArtifacts artifacts: fileName, fingerprint: true
+                            }
+                        } else {
+                            echo "[POST] No PDF files found in workspace"
                         }
-                    } else {
-                        echo "[POST] No PDF files found in workspace"
+                    } catch (Exception e) {
+                        echo "[POST] Error listing PDF files: ${e.message}"
+                        echo "[POST] This is expected if no PDF files exist"
                     }
                 }
             }
@@ -579,8 +629,8 @@ def httpJson(String url, String authHeader=null, String method = 'GET', String b
             cmd.add(cmd.size()-1, '-d')
             cmd.add(cmd.size()-1, body.replace('"', '\"'))
         }
-        // Redact the auth header before printing to avoid Jenkins arnings
-        def curlCmd = cmd.collect { it.startsWith('-H') && it.contans('Authorization:') ? '-H Authorization: ***' : it }.join(' ')
+        // Redact the auth header before printing to avoid Jenkins warnings
+        def curlCmd = cmd.collect { it.startsWith('-H') && it.contains('Authorization:') ? '-H Authorization: ***' : it }.join(' ')
         debug("curl command: ${curlCmd}")
         def raw
         try {
