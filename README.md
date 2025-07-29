@@ -1,6 +1,6 @@
 # Checkmarx ONE Compliance Pipeline
 
-A Jenkins pipeline that automates security scanning across multiple repositories in a GitHub organization for specific branches/tags. The pipeline downloads the Checkmarx ONE CLI, scans repositories, and generates PDF reports using a two-step process for reliable email delivery and local file saving.
+A Jenkins pipeline that automates security scanning across multiple repositories in a GitHub organization for specific branches/tags. The pipeline downloads the Checkmarx ONE CLI (version 2.3.28), scans repositories, and generates comprehensive PDF reports using a two-step process for reliable email delivery and local file saving in the Jenkins workspace.
 
 ## Features
 
@@ -8,7 +8,8 @@ A Jenkins pipeline that automates security scanning across multiple repositories
 - **Parallel Scanning**: Scans multiple repositories simultaneously for efficiency
 - **Two-Step PDF Generation**: First runs the scan, then generates PDF reports using scan IDs for reliability
 - **Email Delivery**: Sends PDF reports directly to specified email recipients
-- **Local File Saving**: Saves PDF reports to Jenkins workspace with custom naming
+- **Local File Saving**: Saves PDF reports to Jenkins workspace with custom naming and proper archiving
+- **Comprehensive Reports**: Generates detailed PDF reports with ScanSummary, ExecutiveSummary, and ScanResults sections
 - **Smart Tag Management**: Uses clean tag names (e.g., "25-6-x" instead of "release:25-6-x")
 - **Enhanced Persistence**: Maintains scan status across pipeline restarts
 - **Force Rescan Control**: Option to ignore existing status and rescan everything
@@ -87,12 +88,13 @@ In your pipeline job configuration, go to the **Build Triggers** section and add
 |----------------|------|---------------|-------------|----------|
 | `DEBUG` | Boolean | `false` | Enable verbose debugging output | ❌ No |
 | `FORCE_RESCAN` | Boolean | `false` | Ignore existing status DB and rescan everything | ❌ No |
-| `CLI_VERSION` | String | `2.0.58` | Checkmarx ONE CLI version to download | ❌ No |
+| `CLI_VERSION` | String | `2.3.28` | Checkmarx ONE CLI version to download | ❌ No |
 | `CRON_SCHEDULE` | String | `H 0 * * 0` | Cron schedule for automated runs (every Sunday) | ❌ No |
 | `CX_BASE_URL` | String | `https://ast.checkmarx.net` | Checkmarx ONE base URL | ❌ No |
 | `CX_IAM_URL` | String | `https://iam.checkmarx.net` | Checkmarx IAM URL | ❌ No |
 | `CX_OAUTH_CLIENT_ID` | String | `ast-app` | OAuth client ID | ❌ No |
 | `CX_REPORT_FORMAT` | String | `pdf` | Report format | ❌ No |
+| `CX_REPORT_OPTIONS` | String | `ScanSummary,ExecutiveSummary,ScanResults` | PDF report sections to include | ❌ No |
 | `CX_DEFAULT_TENANT` | String | `workshop` | Default tenant | ❌ No |
 
 ### Step 5: Configure Pipeline Script
@@ -174,9 +176,21 @@ This allows the pipeline to skip already completed scans on subsequent runs, unl
 ### PDF File Management
 
 - **Naming**: Reports are named as `{repoName}_{releaseTag}_{date}.pdf`
-- **Location**: Saved to Jenkins workspace root directory
-- **Archiving**: Automatically archived as Jenkins artifacts
+- **Location**: Saved to Jenkins workspace root directory (`${WORKSPACE}/`)
+- **Archiving**: Automatically archived as Jenkins artifacts for easy access
+- **Build Page Visibility**: PDF files appear in the "Build Artifacts" section of each build
+- **Download**: Files can be downloaded directly from the Jenkins build page
 - **Fallback Detection**: Multiple strategies to find and archive PDF files
+
+### Jenkins Workspace Integration
+
+The pipeline ensures PDF files are properly integrated with Jenkins:
+
+1. **Workspace Location**: Files are saved to `${WORKSPACE}/` (Jenkins workspace root)
+2. **Artifact Archiving**: Files are automatically archived using `archiveArtifacts`
+3. **Build Page Access**: PDF files appear in the "Build Artifacts" section
+4. **Direct Download**: Users can download files directly from the Jenkins build page
+5. **Post-Build Cleanup**: Additional archiving step ensures no files are missed
 
 ## File Structure
 
@@ -186,8 +200,11 @@ SampleJenkins/
 ├── README.md               # This documentation
 ├── .scan_status.json       # Scan status persistence (created by pipeline)
 ├── .repos_to_scan.json     # Repository list (created by pipeline)
-└── Cx_ProjectReport_*.pdf  # Generated PDF reports (created by pipeline)
+├── CxONE_CLI/              # Checkmarx ONE CLI directory (created by pipeline)
+└── {repoName}_{tag}_{date}.pdf  # Generated PDF reports (created by pipeline)
 ```
+
+**Note**: PDF files are automatically archived as Jenkins artifacts and appear in the "Build Artifacts" section of each build.
 
 ## Troubleshooting
 

@@ -84,6 +84,11 @@ pipeline {
             description: 'Report format (pdf, html, json, sarif, sonar, markdown)'
         )
         string(
+            name: 'CX_REPORT_OPTIONS',
+            defaultValue: 'ScanSummary,ScanResults,Vulnerabilities,Charts,ExecutiveSummary',
+            description: 'PDF report sections to include (comma-separated)'
+        )
+        string(
             name: 'CX_DEFAULT_TENANT',
             defaultValue: 'workshop',
             description: 'Default Checkmarx ONE tenant (used if not found in API key)'
@@ -178,6 +183,20 @@ pipeline {
                                     """
                                 }
                             }
+                        }
+                        
+                        // Check CLI help to see available report options
+                        def cliCmd = IS_UNIX ? "${env.WORKSPACE}/${CLI_DIR}/cx" : "${env.WORKSPACE}\\${CLI_DIR}\\cx.exe"
+                        echo "Checking CLI help for report options..."
+                        try {
+                            def helpCmd = "${cliCmd} results show --help"
+                            def helpOut = IS_UNIX ?
+                                sh(script: helpCmd, returnStdout: true).trim() :
+                                bat(script: helpCmd, returnStdout: true).trim()
+                            echo "[DEBUG] CLI help output (first 2000 chars):"
+                            echo helpOut.take(2000)
+                        } catch (Exception e) {
+                            echo "[WARN] Could not get CLI help: ${e.message}"
                         }
                     }
                 }
@@ -376,7 +395,7 @@ pipeline {
                                         def resultsCmd = "${cliCmd} results show --scan-id ${scanId} " +
                                                         "--report-format pdf " +
                                                         "--report-pdf-email ${params.EMAIL_RECIPIENT} " +
-                                                        "--report-pdf-options ScanSummary,ScanResults " +
+                                                        "--report-pdf-options ${params.CX_REPORT_OPTIONS} " +
                                                         "--output-name ${quote}${repoName}_${releaseTag}_${currentDate}${quote} " +
                                                         "--output-path ${quote}${workspacePath}${quote} " +
                                                         "--debug " +
@@ -385,17 +404,43 @@ pipeline {
                                         echo "[DEBUG] Generating PDF report with command: ${resultsCmd}"
                                         echo "[DEBUG] PDF will be saved to: ${env.WORKSPACE}/${repoName}_${releaseTag}_${currentDate}.pdf"
                                         def resultsOut
+                                        def reportGenerated = false
+                                        
                                         try {
                                             resultsOut = IS_UNIX ?
                                                 sh(script: resultsCmd, returnStdout: true).trim() :
                                                 bat(script: resultsCmd, returnStdout: true).trim()
                                             echo "[DEBUG] Results command completed. Output length: ${resultsOut.length()}"
                                             echo "[DEBUG] Results command output (first 1000 chars): ${resultsOut.take(1000)}"
+                                            reportGenerated = true
                                         } catch (Exception e) {
-                                            echo "[ERROR] Results command failed: ${e.message}"
-                                            echo "[ERROR] Full error details: ${e.toString()}"
-                                            echo "[ERROR] Error class: ${e.getClass().getName()}"
-                                            throw e
+                                            echo "[WARN] Primary report generation failed: ${e.message}"
+                                            echo "[DEBUG] Trying fallback with basic report options..."
+                                            
+                                            // Try fallback with basic options
+                                            def fallbackCmd = "${cliCmd} results show --scan-id ${scanId} " +
+                                                            "--report-format pdf " +
+                                                            "--report-pdf-email ${params.EMAIL_RECIPIENT} " +
+                                                            "--report-pdf-options ScanSummary,ScanResults " +
+                                                            "--output-name ${quote}${repoName}_${releaseTag}_${currentDate}${quote} " +
+                                                            "--output-path ${quote}${workspacePath}${quote} " +
+                                                            "--debug " +
+                                                            apiParam
+                                            
+                                            echo "[DEBUG] Fallback command: ${fallbackCmd}"
+                                            try {
+                                                resultsOut = IS_UNIX ?
+                                                    sh(script: fallbackCmd, returnStdout: true).trim() :
+                                                    bat(script: fallbackCmd, returnStdout: true).trim()
+                                                echo "[DEBUG] Fallback command completed. Output length: ${resultsOut.length()}"
+                                                echo "[DEBUG] Fallback command output (first 1000 chars): ${resultsOut.take(1000)}"
+                                                reportGenerated = true
+                                            } catch (Exception fallbackError) {
+                                                echo "[ERROR] Both primary and fallback report generation failed"
+                                                echo "[ERROR] Primary error: ${e.message}"
+                                                echo "[ERROR] Fallback error: ${fallbackError.message}"
+                                                throw e
+                                            }
                                         }
                                         
                                         // Check for any error messages related to PDF generation
