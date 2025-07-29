@@ -191,30 +191,6 @@ SampleJenkins/
 
 ## Troubleshooting
 
-### Common Setup Issues
-
-#### "Could not find credentials entry with ID 'github-pat'"
-- **Cause**: GitHub credential not configured or wrong ID
-- **Solution**: 
-  1. Go to `Manage Jenkins` → `Manage Credentials` → `System` → `Global credentials`
-  2. Add new credential with ID exactly `github-pat`
-  3. Ensure it's a `Secret text` type
-
-#### "Could not find credentials entry with ID 'cx-api-key'"
-- **Cause**: Checkmarx API key not configured or wrong ID
-- **Solution**:
-  1. Go to `Manage Jenkins` → `Manage Credentials` → `System` → `Global credentials`
-  2. Add new credential with ID exactly `cx-api-key`
-  3. Ensure it's a `Secret text` type
-
-#### "Repository not found" or "Access denied"
-- **Cause**: GitHub PAT doesn't have proper permissions
-- **Solution**: Ensure GitHub PAT has `repo` and `read:org` scopes
-
-#### "Authentication failed" for Checkmarx
-- **Cause**: Invalid or expired Checkmarx API key
-- **Solution**: Generate a new API key in Checkmarx ONE
-
 ### Debug Mode
 
 Enable debug mode by setting the `DEBUG` parameter to `true` in the Jenkins UI. This provides:
@@ -222,28 +198,6 @@ Enable debug mode by setting the `DEBUG` parameter to `true` in the Jenkins UI. 
 - File system operations logging
 - Status database contents
 - PDF file detection details
-
-### Common Runtime Issues
-
-#### PDF Files Not Found
-- **Cause**: File system timing or naming inconsistencies
-- **Solution**: The pipeline now includes enhanced file detection with multiple fallback strategies
-- **Debug**: Check debug logs for file listing and detection attempts
-
-#### Force Rescan Not Working
-- **Cause**: Status database logic issues
-- **Solution**: Fixed status database clearing logic and persistence
-- **Debug**: Check debug logs for status DB operations
-
-#### Only Partial Reports Sent
-- **Cause**: Repository processing or email delivery issues
-- **Solution**: Enhanced logging and summary reporting
-- **Debug**: Check scan summary at end of pipeline
-
-#### File Not Found Issues
-- **Cause**: Workspace path or file system access problems
-- **Solution**: Enhanced workspace verification and file detection
-- **Debug**: Check workspace path and file existence logs
 
 ### Log Analysis
 
@@ -267,29 +221,7 @@ Key log sections to monitor:
 - **Secure Communication**: Uses HTTPS for all API calls
 - **Sandbox Compatibility**: Designed to work within Jenkins script security sandbox
 
-## Recent Fixes
 
-### CLI Validation Issues (Latest)
-- **Problem**: Pipeline failing due to invalid CLI version check
-- **Solution**: Removed CLI version validation to allow pipeline to proceed
-- **Result**: Pipeline now starts successfully and proceeds to scanning
-
-### PDF Archiving Issues (Previous)
-- **Problem**: PDF files were being generated but not found for archiving
-- **Solution**: Enhanced file detection with multiple fallback strategies
-- **Added**: Post-build archiving to ensure all PDFs are captured
-- **Improved**: File system timing with longer wait periods
-
-### Repository Processing Issues (Previous)
-- **Problem**: Only 3 out of 4 repositories were being processed
-- **Solution**: Enhanced logging and summary reporting
-- **Added**: Detailed processing statistics
-- **Fixed**: Status database logic for completed scans
-
-### Email Delivery Issues (Previous)
-- **Problem**: PDF reports not being sent via email
-- **Solution**: Switched to two-step process using `cx results show`
-- **Improved**: Email delivery reliability with proper CLI flags
 
 ## Support
 
