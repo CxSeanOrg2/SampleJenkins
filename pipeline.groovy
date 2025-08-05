@@ -313,7 +313,7 @@ pipeline {
                                         // Try with explicit .pdf extension in output name
                                         // Step 1: Run the scan without PDF generation
                                         def scanCmd = "${cliCmd} scan create --project-name ${quote}Compliance/${githubOrg}/${repoName}/${releaseTag}${quote} " +
-                                                      "-s . --branch ${quote}${releaseTag}${quote} --tags ${quote}${releaseTag}${quote} " +
+                                                      "-s . --branch ${quote}${releaseTag}${quote} --branch-primary --tags ${quote}${releaseTag}${quote} " +
                                                       "--debug " +
                                                       apiParam
 
